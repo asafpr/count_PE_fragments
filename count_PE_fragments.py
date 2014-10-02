@@ -118,7 +118,7 @@ def count_features(features_lists, samfile, overlap):
     fcounts = defaultdict(int)
     counter = 0
     for read in samfile.fetch():
-        if not read.is_paired or read.is_read2 or read.is_unmapped or\
+        if not read.is_paired or read.is_reverse or read.is_unmapped or\
                 read.mate_is_unmapped or\
                 read.is_reverse==read.mate_is_reverse or\
                 not read.is_proper_pair:
@@ -126,11 +126,12 @@ def count_features(features_lists, samfile, overlap):
 #        if read.tlen > 1500:
 #            sys.stderr.write("Read is too long (>1500) %s\n"%str(read))
 #            continue
+        # Take only the forward mate
         counter += 1
         if counter%100000==0:
             sys.stderr.write("Processed %i fragments\n"%counter)
         strand = '+'
-        if read.is_reverse:
+        if read.is_read2:
             strand = '-'
         try:
             chrname = samfile.getrname(read.tid)
@@ -142,15 +143,14 @@ def count_features(features_lists, samfile, overlap):
         # Count the number of times a feature intersects with the fragmen
         rcounts = defaultdict(int)
         for fset in features_lists[chrname+strand][fpos:tpos]:
+
             for el in fset:
                 rcounts[el] += 1
         # Go over the list of features, if the number of counts is above the
         # Threshold add 1 to the count of this feature
-#        print("%s\n%i\t%i"%(str(read), fpos, tpos))
         for feature, counts in rcounts.items():
             if counts >= overlap:
                 fcounts[feature] += 1
-#                print("%s\t%i"%(feature, fcounts[feature]))
     return fcounts
 
 
