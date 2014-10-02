@@ -75,6 +75,8 @@ def read_gtf(gtf_file, feature, identifier):
     """
     # First initialize a dictionary
     pos_feat = defaultdict(lambda: defaultdict(set))
+    # Get all the names of the features
+    all_features = set()
     for line in csv.reader(gtf_file, delimiter='\t'):
         if line[2] != feature:
             continue
@@ -86,6 +88,7 @@ def read_gtf(gtf_file, feature, identifier):
                 pass
             ids_dict[k] = v.replace('"','')
         fid = ids_dict[identifier]
+        all_features.add(fid)
         # Change to 0-based coordinates and add this feature to all the
         # positions it convers
         for i in range(int(line[3])-1, int(line[4])):
@@ -99,7 +102,7 @@ def read_gtf(gtf_file, feature, identifier):
         for k in range(maxpos+1):
             list_of_sets.append(list(data[k]))
         pos_feat_list[chrom] = list_of_sets
-    return pos_feat_list
+    return pos_feat_list, all_features
 
 def count_features(features_lists, samfile, overlap):
     """
@@ -116,8 +119,13 @@ def count_features(features_lists, samfile, overlap):
     counter = 0
     for read in samfile.fetch():
         if not read.is_paired or read.is_read2 or read.is_unmapped or\
-                read.mate_is_unmapped:
+                read.mate_is_unmapped or\
+                read.is_reverse==read.mate_is_reverse or\
+                not read.is_proper_pair:
             continue
+#        if read.tlen > 1500:
+#            sys.stderr.write("Read is too long (>1500) %s\n"%str(read))
+#            continue
         counter += 1
         if counter%100000==0:
             sys.stderr.write("Processed %i fragments\n"%counter)
@@ -138,19 +146,21 @@ def count_features(features_lists, samfile, overlap):
                 rcounts[el] += 1
         # Go over the list of features, if the number of counts is above the
         # Threshold add 1 to the count of this feature
+#        print("%s\n%i\t%i"%(str(read), fpos, tpos))
         for feature, counts in rcounts.items():
             if counts >= overlap:
                 fcounts[feature] += 1
+#                print("%s\t%i"%(feature, fcounts[feature]))
     return fcounts
 
 
 def main(argv=None):
     settings, args = process_command_line(argv)
-    features_lists = read_gtf(
+    features_lists, all_features = read_gtf(
         open(settings.gtf), settings.feature, settings.identifier)
     samfile = pysam.Samfile(settings.samfile)
     fcounts = count_features(features_lists, samfile, settings.overlap)
-    for k in sorted(fcounts.keys()):
+    for k in sorted(list(all_features)):
         print("%s\t%i"%(k, fcounts[k]))
         
     # application code here, like:
