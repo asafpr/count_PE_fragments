@@ -11,7 +11,10 @@ Count the fragment for a gene only if the overlap is higher than a predefined
 variable (l). If the fragment is mapped to different locations count each of
 these locations.
 Input is a gtf (gff) file, read only the lines that are "exon" (column 2),
-identifier is quoted after gene_id in column 8. 
+identifier is quoted after gene_id in column 8.
+
+22/10/14: Added single-end support
+07/12/14: Added -r option for reverse reads (useful mainly in single-end)
 """
 
 import sys
@@ -19,6 +22,7 @@ import optparse
 import pysam
 from collections import defaultdict
 import csv
+import logging
 
 def process_command_line(argv):
     """
@@ -38,8 +42,11 @@ def process_command_line(argv):
         '-g', '--gtf',
         help='GTF file containing the features.')
     parser.add_option(
-        '-s', '--samfile',
-        help='Input sam or bam file.')
+        '-s', '--samfiles',
+        help='Input sam or bam files, comma separated.')
+    parser.add_option(
+        '-r', '--reverse', action='store_true', default=False,
+        help='Count the genes on the reverse strand of the mapping.')
     parser.add_option(
         '-f', '--feature', default='exon',
         help='Name of features to count on the GTF file (column 2).')
@@ -76,7 +83,7 @@ def read_gtf(gtf_file, feature, identifier):
     # First initialize a dictionary
     pos_feat = defaultdict(lambda: defaultdict(set))
     # Get all the names of the features
-    all_features = set()
+    all_features = set(['~~intergenic', '~~antisense'])
     for line in csv.reader(gtf_file, delimiter='\t'):
         if line[2] != feature:
             continue
@@ -104,7 +111,39 @@ def read_gtf(gtf_file, feature, identifier):
         pos_feat_list[chrom] = list_of_sets
     return pos_feat_list, all_features
 
-def count_features(features_lists, samfile, overlap):
+
+def get_paired_pos(read, rev=False):
+    """
+    Given a read which is the positive of the pairs return a strand and
+    start and end positions
+    Arguments:
+    - `read`: A read from pysam
+    """
+    strand = '+'
+    if rev!=read.is_read2:
+        strand = '-'
+    fpos = read.pos
+    tpos = read.tlen + fpos
+    return strand, fpos, tpos
+
+def get_single_pos(read, rev=False):
+    """
+    Given a read which is the positive of the pairs return a strand and
+    start and end positions
+    Arguments:
+    - `read`: A read from pysam
+    """
+    strand = '+'
+    if rev!=read.is_reverse:
+        strand = '-'
+    fpos = read.pos
+    tpos = read.qlen + fpos
+    return strand, fpos, tpos
+
+
+
+
+def count_features(features_lists, samfile, overlap, rev=False):
     """
     Go over the samfile and for each pair of reads find the features that
     overlap the fragment with at least 'overlap' nucleotides. Add 1 to the count
@@ -114,32 +153,35 @@ def count_features(features_lists, samfile, overlap):
     - `features_lists`: The list of features returned from the read_gtf function
     - `samfile`: A pysam object
     - `overlap`: The minimal overlap between the feature and read
+    - `rev`: reverse the strand of the read
     """
     fcounts = defaultdict(int)
     counter = 0
     for read in samfile.fetch():
-        if not read.is_paired or read.is_reverse or read.is_unmapped or\
+        if read.is_paired:
+            if read.is_reverse or read.is_unmapped or\
                 read.mate_is_unmapped or\
                 read.is_reverse==read.mate_is_reverse or\
                 not read.is_proper_pair:
-            continue
-#        if read.tlen > 1500:
-#            sys.stderr.write("Read is too long (>1500) %s\n"%str(read))
-#            continue
+
+                continue
+        else: # single end
+            if  read.is_unmapped:
+                continue
         # Take only the forward mate
         counter += 1
         if counter%100000==0:
             sys.stderr.write("Processed %i fragments\n"%counter)
-        strand = '+'
-        if read.is_read2:
-            strand = '-'
         try:
             chrname = samfile.getrname(read.tid)
         except ValueError:
             sys.stderr.write(str(read)+"\n")
         # Get the positions of the fragment
-        fpos = read.pos
-        tpos = read.tlen + fpos
+        if read.is_paired:
+            strand, fpos, tpos = get_paired_pos(read, rev=rev)
+        else:
+            strand, fpos, tpos = get_single_pos(read, rev=rev)
+        
         # Count the number of times a feature intersects with the fragmen
         rcounts = defaultdict(int)
         for fset in features_lists[chrname+strand][fpos:tpos]:
@@ -148,9 +190,29 @@ def count_features(features_lists, samfile, overlap):
                 rcounts[el] += 1
         # Go over the list of features, if the number of counts is above the
         # Threshold add 1 to the count of this feature
+        is_counted = False
         for feature, counts in rcounts.items():
             if counts >= overlap:
                 fcounts[feature] += 1
+                is_counted = True
+        if not is_counted:
+            # Test if antisense
+            rev_str = '-'
+            if strand == '-':
+                rev_str = '+'
+            rev_counts = defaultdict(int)
+            for fset in features_lists[chrname+rev_str][fpos:tpos]:
+                for el in fset:
+                    rev_counts[el] += 1
+            is_antis = False
+            for feature, counts in rev_counts.items():
+                if counts >= overlap:
+                    is_antis = True
+                    break
+            if is_antis:
+                fcounts['~~antisense'] += 1
+            else:
+                fcounts['~~intergenic'] += 1
     return fcounts
 
 
@@ -158,10 +220,19 @@ def main(argv=None):
     settings, args = process_command_line(argv)
     features_lists, all_features = read_gtf(
         open(settings.gtf), settings.feature, settings.identifier)
-    samfile = pysam.Samfile(settings.samfile)
-    fcounts = count_features(features_lists, samfile, settings.overlap)
+    all_counts = {}
+    for sf in settings.samfiles.split(','):
+        samfile = pysam.Samfile(sf)
+        all_counts[sf] = count_features(
+            features_lists, samfile, settings.overlap, rev=settings.reverse)
+    outer = csv.writer(sys.stdout, delimiter='\t')
+    outer.writerow(['gene name'] + settings.samfiles.split(','))
+    rows = defaultdict(list)
+    for rf in settings.samfiles.split(','):
+        for k in sorted(list(all_features)):
+            rows[k].append(all_counts[rf][k])
     for k in sorted(list(all_features)):
-        print("%s\t%i"%(k, fcounts[k]))
+        outer.writerow([k] + rows[k])
         
     # application code here, like:
     # run(settings, args)
